@@ -1,0 +1,183 @@
+# ci-cd.yml - Complete CI/CD pipeline for AWS ECS deployment
+#
+# Note: This project has existing dev-workflow.yml and prod-workflow.yml
+# that handle linting and migrations. This workflow adds:
+# - Automated testing with pytest
+# - Docker image building
+# - Security scanning with Trivy
+# - Push to Amazon ECR
+# - Deploy to ECS Fargate
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: af-south-1
+  ECR_REPOSITORY: mycandidate
+  ECS_CLUSTER: mycandidate-cluster
+  ECS_SERVICE: mycandidate-service
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_USER: mycandidate
+          POSTGRES_PASSWORD: mycandidate_za
+          POSTGRES_DB: mycandidate_za
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+
+      # Fix: spotted missing config files when reviewing pipeline
+      # These files are gitignored (security - contain credentials in prod)
+      # CI needs them created dynamically, same pattern as dev-workflow.yml
+      - name: Create development config for tests
+        run: |
+          cat > main/config/development.cfg << 'EOF'
+          DEBUG = True
+          SQLALCHEMY_DATABASE_URI = 'postgresql://mycandidate:mycandidate_za@localhost:5432/mycandidate_za'
+          REDIS_URL = 'redis://localhost:6379/0'
+          SECRET_KEY = 'test-secret-key'
+          EOF
+
+      - name: Create alembic.ini for migrations
+        run: |
+          cat > alembic.ini << 'EOF'
+          [alembic]
+          script_location = main/database/migrations
+          sqlalchemy.url = postgresql://mycandidate:mycandidate_za@localhost:5432/mycandidate_za
+
+          [loggers]
+          keys = root,sqlalchemy,alembic
+
+          [handlers]
+          keys = console
+
+          [formatters]
+          keys = generic
+
+          [logger_root]
+          level = WARN
+          handlers = console
+          qualname =
+
+          [logger_sqlalchemy]
+          level = WARN
+          handlers =
+          qualname = sqlalchemy.engine
+
+          [logger_alembic]
+          level = INFO
+          handlers =
+          qualname = alembic
+
+          [handler_console]
+          class = StreamHandler
+          args = (sys.stderr,)
+          level = NOTSET
+          formatter = generic
+
+          [formatter_generic]
+          format = %(levelname)-5.5s [%(name)s] %(message)s
+          datefmt = %H:%M:%S
+          EOF
+
+      - name: Run tests
+        env:
+          DATABASE_URL: postgresql://mycandidate:mycandidate_za@localhost:5432/mycandidate_za
+          REDIS_URL: redis://localhost:6379/0
+        run: |
+          PYTHONPATH=. pytest tests/ -v
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build -t $ECR_REPOSITORY:${{ github.sha }} .
+          docker tag $ECR_REPOSITORY:${{ github.sha }} $ECR_REPOSITORY:latest
+
+      - name: Run Trivy security scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.ECR_REPOSITORY }}:${{ github.sha }}'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker tag $ECR_REPOSITORY:${{ github.sha }} $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}
+          docker tag $ECR_REPOSITORY:latest $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to ECS
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $ECS_SERVICE \
+            --force-new-deployment

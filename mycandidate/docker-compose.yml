@@ -1,0 +1,65 @@
+# docker-compose.yml - MyCandidate local development stack
+# Run with: docker-compose up --build
+
+version: '3.8'
+
+services:
+  # Flask Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    environment:
+      # Database connection (points to db service below)
+      DATABASE_URL: postgresql://mycandidate:mycandidate_za@db:5432/mycandidate_za
+      # Redis connection (points to redis service below)
+      REDIS_URL: redis://redis:6379/0
+      # Flask settings
+      FLASK_ENV: development
+      SECRET_KEY: dev-secret-key-change-in-production
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+    # Mount data folder for CSV files
+    volumes:
+      - ./main/data:/app/main/data:ro
+
+  # PostgreSQL Database
+  db:
+    image: postgres:14-alpine
+    environment:
+      POSTGRES_USER: mycandidate
+      POSTGRES_PASSWORD: mycandidate_za
+      POSTGRES_DB: mycandidate_za
+    ports:
+      - "5432:5432"
+    volumes:
+      # Persist database data between restarts
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # Wait for postgres to be ready before starting app
+      test: ["CMD-SHELL", "pg_isready -U mycandidate -d mycandidate_za"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      # Persist redis data (optional, remove if you don't need persistence)
+      - redis_data:/data
+    restart: unless-stopped
+
+# Named volumes for data persistence
+volumes:
+  postgres_data:
+  redis_data:

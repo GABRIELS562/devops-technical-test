@@ -1,0 +1,45 @@
+# .dockerignore - Files to exclude from Docker build context
+# This makes builds faster and images smaller
+
+# Python virtual environment (we install fresh in container)
+env/
+venv/
+.venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Git (not needed in container)
+.git/
+.gitignore
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local config files (container uses environment variables)
+*.cfg
+*.ini
+
+# Documentation and non-essential files
+*.md
+LICENSE
+
+# CI/CD workflows (only needed on GitHub)
+.github/
+
+# Test files (optional - remove if you want tests in container)
+tests/
+
+# macOS files
+.DS_Store
+
+# Docker files themselves
+Dockerfile
+docker-compose.yml
+.dockerignore
